@@ -1,0 +1,239 @@
+#!/usr/bin/env python3
+import os
+import time
+import threading
+import logging
+from typing import Optional
+
+import requests
+from flask import Flask, jsonify, request
+from dotenv import load_dotenv
+
+# Use python-telegram-bot v20+ in a synchronous Flask app by creating a Bot with a Request object
+from telegram import Bot
+from telegram.utils.request import Request as TGRequest
+
+# Load .env (optional; useful for local testing)
+load_dotenv()
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s"
+)
+
+app = Flask(__name__)
+
+# ===========================
+# Environment Variables (names)
+# ===========================
+STORJ_API = os.getenv("STORJ_API", "").strip()        # e.g. https://example.com/storj/earnings
+VASTAI_API = os.getenv("VASTAI_API", "").strip()      # e.g. https://example.com/vastai/earnings
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "").strip()  # e.g. 123456:ABC-DEF...
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()  # e.g. 123456789 (chat id or @channelusername)
+
+KEEP_ALIVE_INTERVAL = int(os.getenv("KEEP_ALIVE_INTERVAL", 300))         # default 5 min
+EARNINGS_CHECK_INTERVAL = int(os.getenv("EARNINGS_CHECK_INTERVAL", 600))# default 10 min
+DAILY_REPORT_INTERVAL = int(os.getenv("DAILY_REPORT_INTERVAL", 86400))  # default 24 hours
+
+# Create Telegram bot using python-telegram-bot v20+ Request for synchronous usage
+bot: Optional[Bot] = None
+if TELEGRAM_TOKEN:
+    try:
+        tg_req = TGRequest(con_pool_size=8)
+        bot = Bot(token=TELEGRAM_TOKEN, request=tg_req)
+        logging.info("Telegram Bot (v20+) initialized using Request")
+    except Exception as e:
+        logging.exception("Failed to initialize Telegram Bot. Messages will not be sent: %s", e)
+else:
+    logging.warning("TELEGRAM_TOKEN not set. Telegram notifications are disabled.")
+
+# If provided, normalize chat id (int if numeric, else string e.g. '@channelusername')
+if TELEGRAM_CHAT_ID:
+    try:
+        TELEGRAM_CHAT_ID = int(TELEGRAM_CHAT_ID)
+    except ValueError:
+        # keep as string (for usernames)
+        pass
+else:
+    TELEGRAM_CHAT_ID = None
+    logging.warning("TELEGRAM_CHAT_ID not set. Bot will not know where to send messages.")
+
+# ===========================
+# Track last earnings
+# ===========================
+last_storj_earnings = 0.0
+last_vastai_earnings = 0.0
+
+# ===========================
+# Internal Microservices Sales Data
+# ===========================
+sales_data = {
+    "service_1": {"sales": 0, "earnings": 0.0},
+    "service_2": {"sales": 0, "earnings": 0.0},
+    "service_3": {"sales": 0, "earnings": 0.0}
+}
+last_micro_earnings = 0.0
+_sales_lock = threading.Lock()
+
+# ===========================
+# Helper to fetch external earnings
+# ===========================
+def fetch_earnings(api_url: str) -> float:
+    if not api_url:
+        return 0.0
+    try:
+        resp = requests.get(api_url, timeout=10)
+        resp.raise_for_status()
+        data = resp.json()
+        return float(data.get("earnings", 0))
+    except Exception:
+        logging.exception("Error fetching earnings from %s", api_url)
+        return 0.0
+
+def _send_telegram(text: str):
+    if not bot or not TELEGRAM_CHAT_ID:
+        logging.info("Skipping sending Telegram message (bot or chat id missing): %s", text)
+        return
+    try:
+        # python-telegram-bot v20+ supports synchronous send_message when constructed with Request
+        bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=text)
+        logging.info("Sent Telegram message: %s", text)
+    except Exception:
+        logging.exception("Failed to send Telegram message")
+
+# ===========================
+# Keep-alive task
+# ===========================
+def keep_alive_task():
+    while True:
+        try:
+            if STORJ_API:
+                requests.get(STORJ_API, timeout=10)
+            if VASTAI_API:
+                requests.get(VASTAI_API, timeout=10)
+        except Exception:
+            logging.debug("Keep-alive ping failed (ignored).")
+        time.sleep(KEEP_ALIVE_INTERVAL)
+
+# ===========================
+# Earnings monitor (real-time Telegram alerts)
+# ===========================
+def earnings_monitor_task():
+    global last_storj_earnings, last_vastai_earnings, last_micro_earnings
+
+    while True:
+        # Storj
+        try:
+            current_storj = fetch_earnings(STORJ_API)
+            if current_storj > last_storj_earnings:
+                diff = current_storj - last_storj_earnings
+                _send_telegram(f"💰 New Storj earnings: ${diff:.2f}")
+                last_storj_earnings = current_storj
+        except Exception:
+            logging.exception("Storj earnings check failed")
+
+        # Vast.ai
+        try:
+            current_vastai = fetch_earnings(VASTAI_API)
+            if current_vastai > last_vastai_earnings:
+                diff = current_vastai - last_vastai_earnings
+                _send_telegram(f"💰 New Vast.ai earnings: ${diff:.2f}")
+                last_vastai_earnings = current_vastai
+        except Exception:
+            logging.exception("Vast.ai earnings check failed")
+
+        # Microservices
+        try:
+            with _sales_lock:
+                total_micro = sum(s["earnings"] for s in sales_data.values())
+            if total_micro > last_micro_earnings:
+                diff = total_micro - last_micro_earnings
+                _send_telegram(f"💰 New Microservice earnings: ${diff:.2f}")
+                last_micro_earnings = total_micro
+        except Exception:
+            logging.exception("Microservice earnings check failed")
+
+        time.sleep(EARNINGS_CHECK_INTERVAL)
+
+# ===========================
+# Daily report
+# ===========================
+def daily_report_task():
+    while True:
+        try:
+            message = (
+                f"📊 Daily Earnings Report:\n"
+                f"Storj: ${last_storj_earnings:.2f}\n"
+                f"Vast.ai: ${last_vastai_earnings:.2f}\n"
+                f"Microservices: ${last_micro_earnings:.2f}"
+            )
+            _send_telegram(message)
+        except Exception:
+            logging.exception("Daily report failed")
+        time.sleep(DAILY_REPORT_INTERVAL)
+
+# ===========================
+# Start background threads (only if running as main)
+# ===========================
+def start_background_tasks():
+    threading.Thread(target=keep_alive_task, daemon=True).start()
+    threading.Thread(target=earnings_monitor_task, daemon=True).start()
+    threading.Thread(target=daily_report_task, daemon=True).start()
+    logging.info("Background tasks started")
+
+# ===========================
+# Flask Endpoints
+# ===========================
+@app.route('/')
+def index():
+    return "Hidden Bot Running"
+
+@app.route('/ping')
+def ping():
+    return "pong"
+
+# External Earnings Endpoints
+@app.route('/storj')
+def storj_status():
+    return jsonify({"earnings": last_storj_earnings})
+
+@app.route('/vastai')
+def vastai_status():
+    return jsonify({"earnings": last_vastai_earnings})
+
+# ===========================
+# Internal Microservice Endpoints
+# ===========================
+@app.route('/microservices', methods=['GET'])
+def get_microservices():
+    with _sales_lock:
+        total = sum(s["earnings"] for s in sales_data.values())
+        snapshot = dict(sales_data)
+    return jsonify({"total_earnings": total, "services": snapshot})
+
+@app.route('/microservices/sale', methods=['POST'])
+def add_micro_sale():
+    payload = request.get_json(silent=True) or {}
+    service = payload.get("service")
+    try:
+        amount = float(payload.get("amount", 0))
+    except (TypeError, ValueError):
+        return jsonify({"status": "error", "message": "Invalid amount"}), 400
+
+    with _sales_lock:
+        if service in sales_data:
+            sales_data[service]["sales"] += 1
+            sales_data[service]["earnings"] += amount
+            new_total = sales_data[service]["earnings"]
+            return jsonify({"status": "success", "service": service, "new_total": new_total})
+        else:
+            return jsonify({"status": "error", "message": "Service not found"}), 400
+
+# ===========================
+# Run Flask locally
+# ===========================
+if __name__ == "__main__":
+    start_background_tasks()
+    # For local testing; in production we use gunicorn/wsgi
+    app.run(host="0.0.0.0", port=int(os.getenv("PORT", 8080)))

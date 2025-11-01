@@ -1,0 +1,16 @@
+```text
+# Copy to .env for local testing. Do NOT commit your real secrets to git.
+
+# External earnings API endpoints (optional)
+STORJ_API=https://example.com/storj/earnings
+VASTAI_API=https://example.com/vastai/earnings
+
+# Telegram bot
+TELEGRAM_TOKEN=123456:ABC-DEF_your_bot_token_here
+TELEGRAM_CHAT_ID=123456789   # numeric chat id or @channelusername
+
+# Optional tuning
+KEEP_ALIVE_INTERVAL=300
+EARNINGS_CHECK_INTERVAL=600
+DAILY_REPORT_INTERVAL=86400
+```
