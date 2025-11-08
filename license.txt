@@ -1,0 +1,10 @@
+MemeCoin Alert Bot License
+
+This software is licensed for personal or commercial use depending on your purchase tier.
+
+- Personal License: Use for personal Telegram alerts only.
+- Commercial License: Use in commercial projects, resell as part of a service, or deploy for clients.
+
+Redistribution or resale of the source code as-is is prohibited without written permission.
+
+© 2025 KhleezDev
